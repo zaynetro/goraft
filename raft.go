@@ -267,7 +267,7 @@ func (r *raft) startElection() chan int {
 	voteNumRes := make(chan int)
 
 	go func() {
-		var voteNum int32
+		var voteNum int32 = 1 // Vote for ourselves
 		wg := sync.WaitGroup{}
 
 		req := &requestVotePayload{

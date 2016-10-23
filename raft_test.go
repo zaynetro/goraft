@@ -21,65 +21,62 @@ var colors = []string{
 	//string([]byte{27, 91, 57, 55, 59, 52, 49, 109}), // red
 }
 
-func TestMasterElectionRaft(t *testing.T) {
-	log.SetOutput(os.Stdout)
-	assert := assert.New(t)
+type cluster struct {
+	rafts []*raft
+}
 
-	// Start 3 nodes
-	// Wait till all started
-	// One node should be a leader
-	// Others should be followers
-	// Kill first node
-	// One of the remaining ones should become a candidate
-	// Done
-
-	n := 3
-
-	nodes := getNodes(n, 3000)
+func newCluster(n, portOffset int) *cluster {
+	nodes := getNodes(n, portOffset)
 	rafts := []*raft{}
 
-	log.Printf("Nodes: %+v\n", nodes)
-
 	for _, n := range nodes {
-		log.Printf("Starting node %s\n", n.colored())
-		r := newRaft(n.id, nodes...)
-		rafts = append(rafts, r)
+		rafts = append(rafts, newRaft(n.id, nodes...))
+	}
+
+	return &cluster{
+		rafts: rafts,
+	}
+}
+
+func (c *cluster) runAll() {
+	for _, r := range c.rafts {
+		log.Println("Starting node", r.current.colored())
 		go r.run()
 	}
+}
 
-	<-time.After(500 * time.Millisecond)
-
-	assert.Equal(leadersNum(serverTypes(rafts...)...), 1,
-		"One node should be a leader, others followers")
-
-	// Terminate leader node
-	{
-		removeIndex := -1
-		for i, r := range rafts {
-			if r.state.serverType == leader {
-				log.Printf("Exiting node %s\n", nodes[i].colored())
-				r.exit()
-				removeIndex = i
-			}
+func (c cluster) nodesNum(serverType serverType) int {
+	nodes := 0
+	for _, r := range c.rafts {
+		if r.state.serverType == serverType {
+			nodes++
 		}
+	}
+	return nodes
+}
 
-		if removeIndex >= 0 {
-			rafts[removeIndex] = rafts[len(rafts)-1]
-			rafts[len(rafts)-1] = nil
-			rafts = rafts[:len(rafts)-1]
+func (c *cluster) removeNode(serverType serverType) {
+	removeIndex := -1
+	for i, r := range c.rafts {
+		if r.state.serverType == serverType {
+			log.Printf("Exiting node %s\n", r.current.colored())
+			r.exit()
+			removeIndex = i
 		}
 	}
 
-	<-time.After(500 * time.Millisecond)
+	if removeIndex >= 0 {
+		c.rafts[removeIndex] = c.rafts[len(c.rafts)-1]
+		c.rafts[len(c.rafts)-1] = nil
+		c.rafts = c.rafts[:len(c.rafts)-1]
+	}
+}
 
-	assert.Condition(func() bool {
-		first, second := rafts[0].state.serverType, rafts[1].state.serverType
-		return first == candidate || second == candidate
-	}, "One of the running nodes should be a candidate")
-
-	// Terminate others
-	rafts[0].exit()
-	rafts[1].exit()
+func (c *cluster) removeAll() {
+	for _, r := range c.rafts {
+		log.Printf("Exiting node %s\n", r.current.colored())
+		r.exit()
+	}
 }
 
 func getNodes(n int, portOffset int) []*node {
@@ -101,20 +98,33 @@ func getColor(i int) string {
 	return colors[i]
 }
 
-func serverTypes(rafts ...*raft) []serverType {
-	types := []serverType{}
-	for _, r := range rafts {
-		types = append(types, r.state.serverType)
-	}
-	return types
+func TestMain(m *testing.M) {
+	log.SetOutput(os.Stdout)
+	os.Exit(m.Run())
 }
 
-func leadersNum(serverTypes ...serverType) int {
-	leaders := 0
-	for _, serverType := range serverTypes {
-		if serverType == leader {
-			leaders++
-		}
+func TestMasterReelection5Nodes(t *testing.T) {
+	assert := assert.New(t)
+
+	n := 5
+	c := newCluster(n, 3010)
+	c.runAll()
+	<-time.After(400 * time.Millisecond)
+
+	assert.Equal(c.nodesNum(leader), 1, "One node should be a leader")
+	assert.Equal(c.nodesNum(follower), n-1, "Other nodes should be followers")
+
+	for i := 1; i <= 2; i++ {
+		c.removeNode(leader)
+		<-time.After(400 * time.Millisecond)
+
+		assert.Equal(c.nodesNum(leader), 1, "New leader should be selected")
+		assert.Equal(c.nodesNum(follower), n-i-1, "Other nodes should be followers")
 	}
-	return leaders
+
+	c.removeNode(leader)
+	<-time.After(400 * time.Millisecond)
+	assert.True(c.nodesNum(candidate) > 0, "There is at least one candidate")
+
+	c.removeAll()
 }
