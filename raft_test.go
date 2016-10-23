@@ -35,7 +35,7 @@ func TestMasterElectionRaft(t *testing.T) {
 
 	n := 3
 
-	nodes := getNodes(n)
+	nodes := getNodes(n, 3000)
 	rafts := []*raft{}
 
 	log.Printf("Nodes: %+v\n", nodes)
@@ -45,14 +45,11 @@ func TestMasterElectionRaft(t *testing.T) {
 		r := newRaft(n.id, nodes...)
 		rafts = append(rafts, r)
 		go r.run()
-
-		<-time.After(100 * time.Millisecond)
 	}
 
 	<-time.After(500 * time.Millisecond)
 
-	// All nodes are up
-	assert.Condition(oneLeaderCondition(serverTypes(rafts...)...),
+	assert.Equal(leadersNum(serverTypes(rafts...)...), 1,
 		"One node should be a leader, others followers")
 
 	// Terminate leader node
@@ -85,10 +82,10 @@ func TestMasterElectionRaft(t *testing.T) {
 	rafts[1].exit()
 }
 
-func getNodes(n int) []*node {
+func getNodes(n int, portOffset int) []*node {
 	nodes := []*node{}
 	for i := 0; i < n; i++ {
-		port := 3000 + i
+		port := portOffset + i
 		server, _ := url.Parse("http://127.0.0.1:" + strconv.Itoa(port))
 		nodes = append(nodes, &node{
 			uri:   server,
@@ -112,14 +109,12 @@ func serverTypes(rafts ...*raft) []serverType {
 	return types
 }
 
-func oneLeaderCondition(serverTypes ...serverType) func() bool {
-	return func() bool {
-		leaders := 0
-		for _, serverType := range serverTypes {
-			if serverType == leader {
-				leaders++
-			}
+func leadersNum(serverTypes ...serverType) int {
+	leaders := 0
+	for _, serverType := range serverTypes {
+		if serverType == leader {
+			leaders++
 		}
-		return leaders == 1
 	}
+	return leaders
 }

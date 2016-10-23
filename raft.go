@@ -161,6 +161,11 @@ func (r *raft) appendEntries(req *appendEntriesPayload) (*appendEntriesResponse,
 }
 
 func (r *raft) requestVote(req *requestVotePayload) (*requestVoteResponse, error) {
+	if r.state.serverType == leader {
+		r.log.Println("Server is a leader, skipping request vote...")
+		return nil, nil
+	}
+
 	r.ch.requestVote <- struct{}{}
 
 	// Receiver implementation:
@@ -290,7 +295,10 @@ func (r *raft) startElection() chan int {
 				}
 
 				if res.Term > r.state.currentTerm {
+					// Revert to follower
 					r.state.currentTerm = res.Term
+					r.state.serverType = follower
+					atomic.AddInt32(&voteNum, int32(-len(r.nodes)))
 				}
 
 				r.state.votedFor = nil
@@ -337,7 +345,9 @@ func (r *raft) sendAppendEntries() {
 			}
 
 			if res.Term > r.state.currentTerm {
+				// Revert to follower
 				r.state.currentTerm = res.Term
+				r.state.serverType = follower
 			}
 		}(n)
 	}

@@ -6,5 +6,9 @@ Raft description: https://raft.github.io/
 
 ## Implemented
 
-[x] Leader election
-[ ] Log replication
+* [x] Leader election
+* [ ] Log replication
+* [ ] Consistent state machines
+* [ ] Live configuration changes (e.g. number of nodes)
+* [ ] State restoration (transfer snapshots)
+* [ ] Log compaction
