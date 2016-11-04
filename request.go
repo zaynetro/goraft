@@ -12,54 +12,63 @@ import (
 
 type appendEntriesPayload struct {
 	// leader’s term
-	Term int64 `json:"term"`
+	Term int
 
 	// so follower can redirect clients
-	LeaderID string `json:"leaderID"`
+	LeaderID string
 
 	// index of log entry immediately preceding new ones
-	PrevLogIndex int64 `json:"prevLogIndex"`
+	PrevLogIndex int
 
 	// term of prevLogIndex entry
-	PrevLogTerm int64 `json:"prevLogTerm"`
+	PrevLogTerm int
 
 	// log entries to store (empty for heartbeat;
 	// may send more than one for efficiency)
-	Entries []*logEntry `json:"entries"`
+	Entries []*logEntry
 
 	// leader’s commitIndex
-	LeaderCommit int64 `json:"leaderCommit"`
+	LeaderCommit int
 }
 
 type appendEntriesResponse struct {
 	// currentTerm, for leader to update itself
-	Term int64 `json:"term"`
+	Term int
 
 	// true if follower contained entry matching
 	// prevLogIndex and prevLogTerm
-	Success bool `json:"success"`
+	Success bool
 }
 
 type requestVotePayload struct {
 	// candidate’s term
-	Term int64 `json:"term"`
+	Term int
 
 	// candidate requesting vote
-	CandidateID string `json:"candidateID"`
+	CandidateID string
 
 	// index of candidate’s last log entry
-	LastLogIndex int64 `json:"lastLogIndex"`
+	LastLogIndex int
 
 	// term of candidate’s last log entry
-	LastLogTerm int64 `json:"lastLogTerm"`
+	LastLogTerm int
 }
 
 type requestVoteResponse struct {
 	// currentTerm, for candidate to update itself
-	Term int64 `json:"term"`
+	Term int
 
 	// true means candidate received vote
-	VoteGranted bool `json:"voteGranted"`
+	VoteGranted bool
+}
+
+type clientApplyPayload struct {
+	Command string
+}
+
+type clientApplyResponse struct {
+	Success bool
+	Leader  string
 }
 
 func appendEntries(uri url.URL, payload *appendEntriesPayload) (*appendEntriesResponse, error) {
@@ -67,7 +76,7 @@ func appendEntries(uri url.URL, payload *appendEntriesPayload) (*appendEntriesRe
 	toSend := bytes.NewBuffer(payloadStr)
 
 	client := &http.Client{
-		Timeout: 2 * time.Second,
+		Timeout: heartbeatInterval * time.Millisecond,
 	}
 
 	uri.Path = "/appendEntries"
@@ -102,7 +111,7 @@ func requestVote(uri url.URL, payload *requestVotePayload) (*requestVoteResponse
 	toSend := bytes.NewBuffer(payloadStr)
 
 	client := &http.Client{
-		Timeout: 2 * time.Second,
+		Timeout: heartbeatInterval * time.Millisecond,
 	}
 
 	uri.Path = "/requestVote"

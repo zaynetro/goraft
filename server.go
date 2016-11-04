@@ -10,6 +10,7 @@ import (
 type serverMethods struct {
 	appendEntries func(*appendEntriesPayload) (*appendEntriesResponse, error)
 	requestVote   func(*requestVotePayload) (*requestVoteResponse, error)
+	clientApply   func(command string) (bool, string)
 }
 
 type server struct {
@@ -17,6 +18,11 @@ type server struct {
 	port    int
 	log     *log.Logger
 	stopped bool
+}
+
+type successLeaderPair struct {
+	Success bool
+	Leader  string
 }
 
 func newServer(logger *log.Logger, port int, methods *serverMethods) *server {
@@ -52,14 +58,15 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case "/requestVote":
 		onlyPOST(s.requestVoteHandler)(w, r)
 
+	case "/clientApply":
+		onlyPOST(s.clientApplyHandler)(w, r)
+
 	default:
 		notFound(w, r)
 	}
 }
 
-func (s *server) appendEntriesHandler(w http.ResponseWriter,
-	r *http.Request) {
-
+func (s *server) appendEntriesHandler(w http.ResponseWriter, r *http.Request) {
 	decoder := json.NewDecoder(r.Body)
 	payload := &appendEntriesPayload{}
 	err := decoder.Decode(&payload)
@@ -84,9 +91,7 @@ func (s *server) appendEntriesHandler(w http.ResponseWriter,
 	json.NewEncoder(w).Encode(res)
 }
 
-func (s *server) requestVoteHandler(w http.ResponseWriter,
-	r *http.Request) {
-
+func (s *server) requestVoteHandler(w http.ResponseWriter, r *http.Request) {
 	decoder := json.NewDecoder(r.Body)
 	payload := &requestVotePayload{}
 	err := decoder.Decode(&payload)
@@ -109,6 +114,31 @@ func (s *server) requestVoteHandler(w http.ResponseWriter,
 	s.log.Printf("Replying to request vote with: %+v\n", res)
 
 	json.NewEncoder(w).Encode(res)
+}
+
+func (s *server) clientApplyHandler(w http.ResponseWriter, r *http.Request) {
+	// If this node is a leader apply entry to log
+	// If this node knows a leader reply with leader uri
+	// If this node doesn't know a leader, wait till the leader is known
+	decoder := json.NewDecoder(r.Body)
+	payload := &clientApplyPayload{}
+	if err := decoder.Decode(&payload); err != nil {
+		s.log.Printf("Failed server client apply %s\n", err)
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+	defer r.Body.Close()
+
+	s.log.Printf("Recieved client apply request with payload: %+v\n", payload)
+
+	wasApplied, leaderURL := s.methods.clientApply(payload.Command)
+	if wasApplied {
+		s.log.Println("Responding with Success=true and LeaderURL=")
+		json.NewEncoder(w).Encode(&clientApplyResponse{true, ""})
+	} else {
+		s.log.Printf("Responding with Success=false and LeaderURL=%s\n", leaderURL)
+		json.NewEncoder(w).Encode(&clientApplyResponse{false, leaderURL})
+	}
 }
 
 func onlyPOST(fn func(http.ResponseWriter, *http.Request)) func(

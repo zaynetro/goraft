@@ -1,9 +1,12 @@
 package goraft
 
 type logEntry struct {
-	// term when entry was received by leader
-	term int64
+	// Term when entry was received by leader
+	Term int
 
-	// command for state machine
-	command string
+	// Command for state machine
+	Command string
+
+	// Index is a position in the log
+	Index int
 }

@@ -18,18 +18,20 @@ const heartbeatInterval = 150 * time.Millisecond
 var electionTimeoutRangeMillis = []int{150, 300}
 
 type raft struct {
-	nodes   []*node
-	current *node
-	state   *state
-	server  *server
-	ch      *raftChannels
-	log     *log.Logger
-	stopped bool
+	nodes    map[string]*node
+	leaderID string
+	current  *node
+	state    *state
+	server   *server
+	ch       *raftChannels
+	log      *log.Logger
+	stopped  bool
 }
 
 type raftChannels struct {
 	appendEntries chan struct{}
 	requestVote   chan struct{}
+	clientApply   chan struct{}
 	exit          chan struct{}
 }
 
@@ -51,12 +53,12 @@ func init() {
 
 func newRaft(currentID string, nodes ...*node) *raft {
 	var currentNode *node
-	otherNodes := []*node{}
+	otherNodes := map[string]*node{}
 	for _, n := range nodes {
 		if n.id == currentID {
 			currentNode = n
 		} else {
-			otherNodes = append(otherNodes, n)
+			otherNodes[n.id] = n
 		}
 	}
 
@@ -71,6 +73,7 @@ func newRaft(currentID string, nodes ...*node) *raft {
 		ch: &raftChannels{
 			appendEntries: make(chan struct{}),
 			requestVote:   make(chan struct{}),
+			clientApply:   make(chan struct{}),
 			exit:          make(chan struct{}),
 		},
 		log:     logger,
@@ -87,6 +90,7 @@ func newRaft(currentID string, nodes ...*node) *raft {
 	r.server = newServer(logger, currentNode.port, &serverMethods{
 		appendEntries: r.appendEntries,
 		requestVote:   r.requestVote,
+		clientApply:   r.clientApply,
 	})
 
 	return r
@@ -116,7 +120,14 @@ func (r *raft) appendEntries(req *appendEntriesPayload) (*appendEntriesResponse,
 		return nil, nil
 	}
 
-	r.ch.appendEntries <- struct{}{}
+	defer func() {
+		select {
+		case r.ch.appendEntries <- struct{}{}:
+		default:
+		}
+	}()
+
+	r.leaderID = req.LeaderID
 
 	// Receiver implementation:
 	// 1. Reply false if term < currentTerm (§5.1)
@@ -135,11 +146,13 @@ func (r *raft) appendEntries(req *appendEntriesPayload) (*appendEntriesResponse,
 	}
 
 	if req.Term < r.state.currentTerm {
+		r.log.Println("req.Term < r.state.currentTerm")
 		return falseReply, nil
 	}
 
-	if int64(len(r.state.log)) < req.PrevLogIndex ||
+	if len(r.state.log) < req.PrevLogIndex ||
 		r.state.lastLogTerm() != req.PrevLogTerm {
+		r.log.Println("Log len", len(r.state.log), "req prevLogIndex", req.PrevLogIndex, "last log term", r.state.lastLogTerm(), "req prevLogTerm", req.PrevLogTerm)
 		return falseReply, nil
 	}
 
@@ -149,10 +162,11 @@ func (r *raft) appendEntries(req *appendEntriesPayload) (*appendEntriesResponse,
 	r.state.log = append(r.state.log, req.Entries...)
 
 	if req.LeaderCommit > r.state.commitIndex {
-		r.state.commitIndex = int64(
-			math.Min(
-				float64(req.LeaderCommit), float64(r.state.lastLogIndex())))
+		r.state.commitIndex = int(math.Min(
+			float64(req.LeaderCommit), float64(r.state.lastApplied)))
 	}
+
+	r.state.currentTerm = req.Term
 
 	return &appendEntriesResponse{
 		Term:    r.state.currentTerm,
@@ -166,7 +180,12 @@ func (r *raft) requestVote(req *requestVotePayload) (*requestVoteResponse, error
 		return nil, nil
 	}
 
-	r.ch.requestVote <- struct{}{}
+	defer func() {
+		select {
+		case r.ch.requestVote <- struct{}{}:
+		default:
+		}
+	}()
 
 	// Receiver implementation:
 	// 1. Reply false if term < currentTerm (§5.1)
@@ -184,7 +203,7 @@ func (r *raft) requestVote(req *requestVotePayload) (*requestVoteResponse, error
 	}
 
 	if (r.state.votedFor == nil || (*r.state.votedFor) == req.CandidateID) &&
-		req.LastLogIndex >= int64(len(r.state.log)) {
+		req.LastLogIndex+1 >= len(r.state.log) {
 		return &requestVoteResponse{
 			Term:        r.state.currentTerm,
 			VoteGranted: true,
@@ -192,6 +211,38 @@ func (r *raft) requestVote(req *requestVotePayload) (*requestVoteResponse, error
 	}
 
 	return nil, errors.New("Couldn't deny or grant a vote")
+}
+
+func (r *raft) clientApply(command string) (bool, string) {
+	defer func() {
+		select {
+		case r.ch.clientApply <- struct{}{}:
+		default:
+		}
+	}()
+
+	switch r.state.serverType {
+	case follower:
+		// If knows the leader return the leader
+		// TODO: Otherwise wait for it
+		return false, r.nodes[r.leaderID].uri.String()
+	case candidate:
+		// TODO: Wait for leader
+		return false, ""
+
+	case leader:
+		// Apply log
+		index := len(r.state.log)
+		r.state.log = append(r.state.log, &logEntry{
+			Command: command,
+			Term:    r.state.currentTerm,
+			Index:   index,
+		})
+		r.state.lastApplied = index
+		return true, ""
+	}
+
+	return false, ""
 }
 
 func (r *raft) routine() {
@@ -230,8 +281,8 @@ func (r *raft) routine() {
 				r.log.Printf("Received %d votes\n", voteNum)
 				if voteNum > (len(r.nodes) / 2) {
 					r.log.Println("Becoming a leader...")
-					r.state.serverType = leader
-					r.state.votedFor = nil
+					r.leaderID = r.current.id
+					r.state.becomeLeader(r.nodes)
 				} else {
 					select {
 					case <-r.getElectionTimeoutTicker().C:
@@ -248,10 +299,14 @@ func (r *raft) routine() {
 			// 2. Wait
 			r.log.Println("Sending append entries to all nodes...")
 			go r.sendAppendEntries()
+
 			r.log.Println("Waiting for hearbeatInterval", heartbeatInterval)
 			select {
 			case <-r.ch.requestVote:
 				r.log.Println("Received request vote while a leader")
+
+			case <-r.ch.clientApply:
+				r.log.Println("Received client apply")
 
 			case <-time.After(heartbeatInterval):
 			}
@@ -263,6 +318,7 @@ func (r *raft) startElection() chan int {
 	r.state.serverType = candidate
 	r.state.currentTerm++
 	r.state.votedFor = &r.current.id
+	r.leaderID = ""
 
 	voteNumRes := make(chan int)
 
@@ -273,7 +329,7 @@ func (r *raft) startElection() chan int {
 		req := &requestVotePayload{
 			Term:         r.state.currentTerm,
 			CandidateID:  r.current.id,
-			LastLogIndex: int64(r.state.lastLogIndex()),
+			LastLogIndex: r.state.lastApplied,
 			LastLogTerm:  r.state.lastLogTerm(),
 		}
 
@@ -313,19 +369,31 @@ func (r *raft) startElection() chan int {
 }
 
 func (r *raft) sendAppendEntries() {
-	wg := sync.WaitGroup{}
-
-	req := &appendEntriesPayload{
-		Term:         r.state.currentTerm,
-		LeaderID:     r.current.id,
-		PrevLogIndex: int64(r.state.lastLogIndex()),
-		PrevLogTerm:  r.state.lastLogTerm(),
-		Entries:      []*logEntry{},
-		LeaderCommit: r.state.commitIndex,
-	}
+	var wg sync.WaitGroup
+	var successes int32 = 1
 
 	for _, n := range r.nodes {
 		wg.Add(1)
+
+		nodeMatchIndex := r.state.matchIndex[n.id]
+		r.log.Printf("Match indices %+v\n", r.state.matchIndex)
+		prevLogIndex := nodeMatchIndex
+		lastLogIndexSent := r.state.lastApplied
+
+		req := &appendEntriesPayload{
+			Term:         r.state.currentTerm,
+			LeaderID:     r.current.id,
+			PrevLogIndex: prevLogIndex,
+			PrevLogTerm:  r.state.logEntryTerm(prevLogIndex),
+			Entries:      []*logEntry{},
+			LeaderCommit: r.state.commitIndex,
+		}
+
+		// TODO: limit entries if there are too many of them
+		for i := prevLogIndex + 1; i <= r.state.lastApplied; i++ {
+			req.Entries = append(req.Entries, r.state.log[i])
+		}
+
 		go func(n *node) {
 			defer wg.Done()
 
@@ -334,25 +402,36 @@ func (r *raft) sendAppendEntries() {
 			if err != nil {
 				r.log.Printf("Failed to send append entries request %s %s\n",
 					n.colored(), err)
+
+				// TODO: retry the same request
 				return
 			}
 
 			r.log.Printf("Append entries request response %s: %+v\n",
 				n.colored(), res)
 
-			if !res.Success {
-				// TODO: act
-			}
-
 			if res.Term > r.state.currentTerm {
 				// Revert to follower
 				r.state.currentTerm = res.Term
 				r.state.serverType = follower
+				return
+			}
+
+			if !res.Success {
+				// TODO: Retry with a lower index perhaps?
+				r.state.nextIndex[n.id] = r.state.nextIndex[n.id] - 1
+			} else {
+				atomic.AddInt32(&successes, 1)
+				r.state.nextIndex[n.id] = lastLogIndexSent + 1
+				r.state.matchIndex[n.id] = lastLogIndexSent
 			}
 		}(n)
 	}
 
 	wg.Wait()
+
+	// If majority of nodes appended the entry, commit it
+	// r.state.commitIndex = ???
 }
 
 func (r raft) getElectionTimeoutTicker() *time.Ticker {
