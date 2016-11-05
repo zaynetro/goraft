@@ -56,10 +56,20 @@ func newClusterWrongAddrs(n, portOffset int) *cluster {
 }
 
 func (c *cluster) runAll() {
-	for _, r := range c.rafts {
-		log.Println("Starting node", r.current.colored())
-		go r.run()
+	for i := range c.rafts {
+		c.runIndex(i)
 	}
+}
+
+func (c *cluster) run(n int) {
+	for i := 0; i < n; i++ {
+		c.runIndex(i)
+	}
+}
+
+func (c *cluster) runIndex(i int) {
+	log.Println("starting node", c.rafts[i].current.colored())
+	go c.rafts[i].run()
 }
 
 func (c cluster) nodesNum(serverType serverType) int {
@@ -252,6 +262,44 @@ func TestClientApplyNoLeader(t *testing.T) {
 
 	for _, c := range candidates {
 		assert.Equal(0, len(c.state.log), "Log should be empty")
+	}
+
+	c.removeAll()
+}
+
+func TestLogReplicationFailNode3Nodes(t *testing.T) {
+	assert := assert.New(t)
+
+	n := 3
+	c := newCluster(n, 3040)
+	c.run(n - 1)
+	<-time.After(400 * time.Millisecond)
+
+	assert.Equal(1, c.nodesNum(leader), "One node should be leader")
+	// Node that is not running will be also a follower as
+	// it is a starting option
+	assert.Equal(n-1, c.nodesNum(follower), "Other nodes should be follower")
+
+	leaders := c.find(leader)
+
+	commands := []string{"one", "two", "three"}
+	for _, command := range commands {
+		_, err := clientApply(*leaders[0].current.uri, command)
+		assert.Nil(err, "Client apply should succeed")
+	}
+
+	assert.Equal(len(commands), len(leaders[0].state.log),
+		"Leader should have received all entries")
+
+	c.runIndex(n - 1)
+	<-time.After(200 * time.Millisecond)
+
+	{
+		followers := c.find(follower)
+		for _, f := range followers {
+			assert.Equal(len(commands), len(f.state.log),
+				"Follower should have received all entries")
+		}
 	}
 
 	c.removeAll()

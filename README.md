@@ -2,11 +2,10 @@
 
 Raft description: https://raft.github.io/
 
-**Work in progress**
+This is hobby project for me to learn raft algorithm. Not designed for any other use than educational.
 
 ## Should be fixed
 
-* [x] Log indices start at -1
 * [ ] Validate all struct fields in the tests
 * [ ] Maintain mapping between nodes and last applied log entry
 * [ ] Retry appendEntries RPC indefinitely
@@ -16,7 +15,7 @@ Raft description: https://raft.github.io/
 ## Implemented features
 
 * [x] Leader election
-* [ ] Log replication
+* [x] Log replication
 * [ ] Consistent state machines
     * [ ] If leader executed a command and crashed, then client retries the same
       command with a new leader. This way state will be changed two times.
