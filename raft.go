@@ -32,6 +32,7 @@ type raftChannels struct {
 	appendEntries chan struct{}
 	requestVote   chan struct{}
 	clientApply   chan struct{}
+	typeChange    chan serverType
 	exit          chan struct{}
 }
 
@@ -74,6 +75,7 @@ func newRaft(currentID string, nodes ...*node) *raft {
 			appendEntries: make(chan struct{}),
 			requestVote:   make(chan struct{}),
 			clientApply:   make(chan struct{}),
+			typeChange:    make(chan serverType),
 			exit:          make(chan struct{}),
 		},
 		log:     logger,
@@ -223,12 +225,19 @@ func (r *raft) clientApply(command string) (bool, string) {
 
 	switch r.state.serverType {
 	case follower:
-		// If knows the leader return the leader
-		// TODO: Otherwise wait for it
-		return false, r.nodes[r.leaderID].uri.String()
+		if len(r.leaderID) == 0 {
+			select {
+			case <-r.ch.typeChange:
+				return r.clientApply(command)
+			}
+		} else {
+			return false, r.nodes[r.leaderID].uri.String()
+		}
 	case candidate:
-		// TODO: Wait for leader
-		return false, ""
+		select {
+		case <-r.ch.typeChange:
+			return r.clientApply(command)
+		}
 
 	case leader:
 		// Apply log
@@ -242,6 +251,7 @@ func (r *raft) clientApply(command string) (bool, string) {
 		return true, ""
 	}
 
+	r.log.Println("Unknown server type", r.state.serverType)
 	return false, ""
 }
 
@@ -263,7 +273,7 @@ func (r *raft) routine() {
 			case <-r.getElectionTimeoutTicker().C:
 				r.log.Println("Follower hasn't received append entries within" +
 					" election timeout, becoming a candidate")
-				r.state.serverType = candidate
+				r.become(candidate)
 			}
 
 		case candidate:
@@ -275,11 +285,11 @@ func (r *raft) routine() {
 
 			case <-r.ch.appendEntries:
 				r.log.Println("Received append entries becoming a follower")
-				r.state.serverType = follower
+				r.become(follower)
 
 			case voteNum := <-r.startElection():
 				r.log.Printf("Received %d votes\n", voteNum)
-				if voteNum > (len(r.nodes) / 2) {
+				if voteNum > ((len(r.nodes) + 1) / 2) {
 					r.log.Println("Becoming a leader...")
 					r.leaderID = r.current.id
 					r.state.becomeLeader(r.nodes)
@@ -315,7 +325,9 @@ func (r *raft) routine() {
 }
 
 func (r *raft) startElection() chan int {
-	r.state.serverType = candidate
+	if r.state.serverType != candidate {
+		r.become(candidate)
+	}
 	r.state.currentTerm++
 	r.state.votedFor = &r.current.id
 	r.leaderID = ""
@@ -353,7 +365,7 @@ func (r *raft) startElection() chan int {
 				if res.Term > r.state.currentTerm {
 					// Revert to follower
 					r.state.currentTerm = res.Term
-					r.state.serverType = follower
+					r.become(follower)
 					atomic.AddInt32(&voteNum, int32(-len(r.nodes)))
 				}
 
@@ -413,7 +425,7 @@ func (r *raft) sendAppendEntries() {
 			if res.Term > r.state.currentTerm {
 				// Revert to follower
 				r.state.currentTerm = res.Term
-				r.state.serverType = follower
+				r.become(follower)
 				return
 			}
 
@@ -432,6 +444,14 @@ func (r *raft) sendAppendEntries() {
 
 	// If majority of nodes appended the entry, commit it
 	// r.state.commitIndex = ???
+}
+
+func (r *raft) become(serverType serverType) {
+	r.state.serverType = serverType
+	select {
+	case r.ch.typeChange <- serverType:
+	default:
+	}
 }
 
 func (r raft) getElectionTimeoutTicker() *time.Ticker {

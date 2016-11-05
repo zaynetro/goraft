@@ -42,6 +42,19 @@ func newCluster(n, portOffset int) *cluster {
 	}
 }
 
+func newClusterWrongAddrs(n, portOffset int) *cluster {
+	rafts := []*raft{}
+
+	for i := 0; i < n; i++ {
+		nodes := getNodes(n, portOffset+i*n)
+		rafts = append(rafts, newRaft(nodes[0].id, nodes...))
+	}
+
+	return &cluster{
+		rafts: rafts,
+	}
+}
+
 func (c *cluster) runAll() {
 	for _, r := range c.rafts {
 		log.Println("Starting node", r.current.colored())
@@ -217,6 +230,28 @@ func TestLogReplication3Nodes(t *testing.T) {
 			"Clint apply request should return leader")
 		assert.Equal(clientApplyRes.Leader, leaders[0].current.uri.String(),
 			"Clint apply request should return correct leader")
+	}
+
+	c.removeAll()
+}
+
+func TestClientApplyNoLeader(t *testing.T) {
+	assert := assert.New(t)
+
+	n := 2
+	c := newClusterWrongAddrs(n, 3030)
+	c.runAll()
+	<-time.After(400 * time.Millisecond)
+
+	candidates := c.find(candidate)
+	assert.Equal(2, len(candidates), "Both nodes should be candidates")
+
+	command := "test client apply no leader"
+	_, err := clientApply(*candidates[0].current.uri, command)
+	assert.NotNil(err, "Client apply request should timeout")
+
+	for _, c := range candidates {
+		assert.Equal(0, len(c.state.log), "Log should be empty")
 	}
 
 	c.removeAll()
